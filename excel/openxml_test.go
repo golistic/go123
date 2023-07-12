@@ -5,6 +5,7 @@ package excel_test
 import (
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/golistic/xt"
@@ -22,6 +23,38 @@ func TestNew(t *testing.T) {
 	t.Run("cannot open other kinds of Open XML files", func(t *testing.T) {
 		_, err := excel.New("_testdata/testsheets.xlsx")
 		xt.OK(t, err)
+	})
+}
+
+func TestNewReader(t *testing.T) {
+	t.Run("use io.Reader", func(t *testing.T) {
+		r, err := os.Open("_testdata/testsheets.xlsx")
+		xt.OK(t, err)
+		defer func() { _ = r.Close() }()
+
+		info, err := os.Stat("_testdata/testsheets.xlsx")
+		xt.OK(t, err)
+
+		ox, err := excel.NewWithReader(r, info.Size())
+		xt.OK(t, err)
+
+		sheets, err := ox.Sheets()
+		xt.Eq(t, 3, len(sheets))
+
+		xt.OK(t, ox.Close())
+		xt.OK(t, r.Close())
+	})
+
+	t.Run("cannot open other kinds of Open XML files", func(t *testing.T) {
+		r, err := os.Open("_testdata/word.docx")
+		xt.OK(t, err)
+		defer func() { _ = r.Close() }()
+
+		info, err := os.Stat("_testdata/word.docx")
+		xt.OK(t, err)
+
+		_, err = excel.NewWithReader(r, info.Size())
+		xt.KO(t, err)
 	})
 }
 

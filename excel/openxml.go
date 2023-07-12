@@ -12,8 +12,10 @@ import (
 
 // OpenXML defines an Excel Open XML file.
 type OpenXML struct {
-	filename string
-	rcZip    *zip.ReadCloser
+	filename    string
+	rcZipCloser *zip.ReadCloser
+	rZip        *zip.Reader
+	origReader  *io.Reader
 }
 
 // New takes filename as the location of an Excel Open XML file and tries
@@ -29,24 +31,46 @@ func New(filename string) (*OpenXML, error) {
 		return nil, err
 	}
 
-	rels, err := ox.getRelationships("_rels/.rels")
-	if err != nil || rels.GetID("rId1").Target != "xl/workbook.xml" {
-		return nil, fmt.Errorf("excel: opening file '%s' (%w)", filename, ErrNotMSExcel)
+	if err := ox.verifyExcel(); err != nil {
+		return nil, err
+	}
+
+	return ox, nil
+}
+
+// NewWithReader opens the Excel Open XML file for reading using an
+// io.Reader. The size argument is the size of the ZIP-file.
+func NewWithReader(r io.Reader, size int64) (*OpenXML, error) {
+	ox := &OpenXML{}
+
+	if err := ox.openZipFileWithReader(r, size); err != nil {
+		return nil, err
+	}
+
+	if err := ox.verifyExcel(); err != nil {
+		return nil, err
 	}
 
 	return ox, nil
 }
 
 // Close the reader. This must be called when reader is no longer needed.
+// When ox was created using an io.Reader, Close does not do anything.
 func (ox *OpenXML) Close() error {
-	return ox.rcZip.Close()
+	if ox.rcZipCloser != nil {
+		return ox.rcZipCloser.Close()
+	}
+
+	return nil
 }
 
 // MustClose the reader but panics on error instead. This is mainly useful for
 // tests. See Close.
 func (ox *OpenXML) MustClose() {
-	if err := ox.rcZip.Close(); err != nil {
-		panic(fmt.Sprintf("excel: %s", err))
+	if ox.rcZipCloser != nil {
+		if err := ox.rcZipCloser.Close(); err != nil {
+			panic(fmt.Sprintf("excel: %s", err))
+		}
 	}
 }
 
@@ -95,10 +119,21 @@ func (ox *OpenXML) Worksheet(name string) (*Worksheet, error) {
 	return &worksheet, err
 }
 
+func (ox *OpenXML) verifyExcel() error {
+
+	r, err := ox.getRelationships("_rels/.rels")
+	if err != nil || r.GetID("rId1").Target != "xl/workbook.xml" {
+		return fmt.Errorf("excel: opening (%w)", ErrNotMSExcel)
+	}
+
+	return nil
+}
+
 // openZipFile opens the Excel Open XML file for reading.
 func (ox *OpenXML) openZipFile() error {
+
 	var err error
-	ox.rcZip, err = zip.OpenReader(ox.filename)
+	ox.rcZipCloser, err = zip.OpenReader(ox.filename)
 	if err != nil {
 		return fmt.Errorf("excel: opening file '%s' (%w)", ox.filename, err)
 	}
@@ -106,14 +141,59 @@ func (ox *OpenXML) openZipFile() error {
 	return nil
 }
 
+// openZipFileWithReader opens the Excel Open XML file for reading using an
+// io.Reader. The size argument is the size of the ZIP-file.
+func (ox *OpenXML) openZipFileWithReader(r io.Reader, size int64) error {
+
+	rZip, err := zip.NewReader(r.(io.ReaderAt), size)
+	if err != nil {
+		return fmt.Errorf("excel: opening zip file (%w)", err)
+	}
+
+	ox.rZip = rZip
+
+	return nil
+}
+
 func (ox *OpenXML) openFile(filename string) (io.ReadCloser, error) {
-	for _, f := range ox.rcZip.File {
-		if f.Name == filename {
-			return f.Open()
+	if ox.rZip != nil {
+		for _, f := range ox.rZip.File {
+			if f.Name == filename {
+				return f.Open()
+			}
+		}
+	}
+
+	if ox.rcZipCloser != nil {
+		for _, f := range ox.rcZipCloser.File {
+			if f.Name == filename {
+				return f.Open()
+			}
 		}
 	}
 
 	return nil, fmt.Errorf("excel: opening file '%s' (not available)", filename)
+}
+
+func (ox *OpenXML) getFileFromZip(filePath string) (*zip.File, error) {
+
+	if ox.rcZipCloser != nil {
+		for _, f := range ox.rcZipCloser.File {
+			if f.Name == filePath {
+				return f, nil
+			}
+		}
+	}
+
+	if ox.rZip != nil {
+		for _, f := range ox.rZip.File {
+			if f.Name == filePath {
+				return f, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("getting file %s", filePath)
 }
 
 // openWorksheet looks up worksheet with given name and returns the
@@ -157,20 +237,9 @@ func (ox *OpenXML) openWorksheetFile(name string) (io.ReadCloser, error) {
 }
 
 func (ox *OpenXML) openWorkbookFile() (io.ReadCloser, error) {
-	// Find the workbook XML file
-	var wb *zip.File
-	for _, f := range ox.rcZip.File {
-		if f.Name == "xl/workbook.xml" {
-			wb = f
-			break
-		}
-	}
+	const wbPath = "xl/workbook.xml"
 
-	if wb == nil {
-		return nil, fmt.Errorf("excel: locating workbook")
-	}
-
-	rc, err := wb.Open()
+	rc, err := ox.openFile(wbPath)
 	if err != nil {
 		return nil, fmt.Errorf("excel: opening workbook (%w)", err)
 	}
